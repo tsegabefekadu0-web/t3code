@@ -4,7 +4,10 @@ import {
   type ServerSettings,
   type ProjectId,
   resolveProjectProviderInstanceEnabled,
+  type UsageBucket,
   type UsageLimitsReport,
+  type UsageProviderKind,
+  type UsageSummary,
   type ProviderInstanceId,
   type ProviderConsumeResetCreditInput,
   type ServerProviderSlashCommand,
@@ -876,4 +879,92 @@ export function collectProviderUsageLimits(
     }
   }
   return { createdAt: DateTime.formatIso(DateTime.makeUnsafe(now)), accounts, notices };
+}
+
+/**
+ * Limits are usually re-read with the provider health probe every few minutes,
+ * so this much age means the last reads failed or the provider was not asked.
+ */
+export const PROVIDER_USAGE_STALE_AFTER_MS = 15 * MINUTE;
+
+export interface ObservedModelUsage {
+  readonly model: string;
+  readonly records: number;
+  readonly totalTokens: number;
+  readonly costUsd: number;
+}
+
+export interface ObservedUsageWindow {
+  readonly label: string;
+  readonly since: string;
+  readonly until: string;
+  readonly records: number;
+  readonly totalTokens: number;
+  readonly costUsd: number;
+  readonly models: readonly ObservedModelUsage[];
+  readonly omittedModels: number;
+}
+
+function bucketTokens(bucket: UsageBucket): number {
+  return (
+    bucket.totals.uncachedInputTokens +
+    bucket.totals.cachedInputTokens +
+    bucket.totals.cacheCreationTokens +
+    bucket.totals.outputTokens
+  );
+}
+
+/**
+ * Requests, tokens, and cost per model from a usage summary T3 already read.
+ * Hourly summaries keep only buckets inside the window; daily summaries keep
+ * every bucket the server returned, since a day cannot be split here.
+ */
+export function observedUsageFromSummary(input: {
+  readonly summary: UsageSummary;
+  readonly provider: UsageProviderKind;
+  readonly label: string;
+  readonly sinceMs: number;
+  readonly untilMs: number;
+  readonly modelLimit?: number;
+}): ObservedUsageWindow {
+  const hourly = input.summary.buckets.some((bucket) => bucket.hourStart !== undefined);
+  const modelLimit = input.modelLimit ?? 8;
+  const byModel = new Map<string, ObservedModelUsage>();
+  let records = 0;
+  let totalTokens = 0;
+  let costUsd = 0;
+  for (const bucket of input.summary.buckets) {
+    if (bucket.provider !== input.provider) continue;
+    if (hourly) {
+      const at = bucket.hourStart === undefined ? NaN : Date.parse(bucket.hourStart);
+      if (!Number.isFinite(at) || at < input.sinceMs || at > input.untilMs) continue;
+    }
+    const tokens = bucketTokens(bucket);
+    records += bucket.records;
+    totalTokens += tokens;
+    costUsd += bucket.costUsd;
+    const previous = byModel.get(bucket.model);
+    byModel.set(bucket.model, {
+      model: bucket.model,
+      records: (previous?.records ?? 0) + bucket.records,
+      totalTokens: (previous?.totalTokens ?? 0) + tokens,
+      costUsd: (previous?.costUsd ?? 0) + bucket.costUsd,
+    });
+  }
+  const models = [...byModel.values()].sort(
+    (left, right) =>
+      right.totalTokens - left.totalTokens ||
+      right.records - left.records ||
+      left.model.localeCompare(right.model),
+  );
+  return {
+    label: input.label,
+    since: DateTime.formatIso(DateTime.makeUnsafe(input.sinceMs)),
+    until: DateTime.formatIso(DateTime.makeUnsafe(input.untilMs)),
+    records,
+    totalTokens,
+    costUsd,
+    models: models.slice(0, modelLimit),
+    omittedModels: Math.max(0, models.length - modelLimit),
+  };
 }

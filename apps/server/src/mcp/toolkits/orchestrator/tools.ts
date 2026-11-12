@@ -1,6 +1,8 @@
 import {
   OrchestratorMcpCapabilitiesInput,
   OrchestratorMcpCapabilitiesResult,
+  OrchestratorMcpProviderUsageInput,
+  OrchestratorMcpProviderUsageResult,
   OrchestrationV2StopWorkflowInput,
   OrchestratorMcpEnvironmentLinkInput,
   OrchestratorMcpEnvironmentLinkResult,
@@ -79,6 +81,20 @@ const OrchestratorCapabilitiesTool = Tool.make("orchestrator_capabilities", {
   dependencies,
 })
   .annotate(Tool.Title, "Get orchestration capabilities")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const ProviderUsageTool = Tool.make("provider_usage", {
+  description:
+    "Read provider plan limits: each window's percent left, reset time, and when it was fetched. Provider instances without plan limits show locally observed usage instead, never a quota. `refresh` re-reads first. Account emails are not included.",
+  parameters: OrchestratorMcpProviderUsageInput,
+  success: OrchestratorMcpProviderUsageResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Read provider usage limits")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
@@ -349,6 +365,7 @@ const EnvironmentUnlinkTool = Tool.make("t3_environment_unlink", {
 
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
+  ProviderUsageTool,
   DelegateTaskTool,
   TaskStatusTool,
   TaskCancelTool,

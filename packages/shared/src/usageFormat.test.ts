@@ -2,7 +2,12 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { UsageSource } from "@t3tools/contracts";
 
-import { formatHourShort, makeWindow, usageSourceMessages } from "./usageFormat.ts";
+import {
+  formatHourShort,
+  makeRollingWindow,
+  makeWindow,
+  usageSourceMessages,
+} from "./usageFormat.ts";
 
 function malformedSource(count: number, overrides: Partial<UsageSource> = {}): UsageSource {
   return {
@@ -175,5 +180,25 @@ describe("hourly usage formatting", () => {
     } finally {
       resolvedOptions.mockRestore();
     }
+  });
+});
+
+describe("rolling hourly windows", () => {
+  it("ends now and clamps to the server's 24-hour hourly limit", () => {
+    const now = new Date("2026-08-11T12:37:42.123Z");
+    const fiveHours = makeRollingWindow(5, now);
+    expect(fiveHours.resolution).toBe("hour");
+    expect(fiveHours.untilTime).toBe("2026-08-11T12:37:00.000Z");
+    expect(fiveHours.sinceTime).toBe("2026-08-11T07:37:00.000Z");
+
+    const clamped = makeRollingWindow(30, now);
+    expect(clamped.sinceTime).toBe("2026-08-10T12:37:00.000Z");
+    expect(Date.parse(clamped.untilTime!) - Date.parse(clamped.sinceTime!)).toBe(24 * 60 * 60_000);
+  });
+
+  it("spans the two calendar days a window crossing midnight touches", () => {
+    const window = makeRollingWindow(5, new Date("2026-08-12T02:00:00.000Z"));
+    expect(window.sinceDay <= window.untilDay).toBe(true);
+    expect(Date.parse(window.untilTime!) - Date.parse(window.sinceTime!)).toBe(5 * 60 * 60_000);
   });
 });

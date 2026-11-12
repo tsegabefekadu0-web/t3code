@@ -3645,3 +3645,153 @@ describe("OrchestratorMcpService thread stop", () => {
     ),
   );
 });
+
+describe("OrchestratorMcpService provider usage", () => {
+  const checkedAt = "2026-11-12T11:58:00.000Z";
+  const limits = {
+    checkedAt,
+    windows: [
+      {
+        id: "five_hour",
+        kind: "session" as const,
+        label: "Session",
+        usedPercent: 25,
+        resetsAt: "2026-11-12T14:30:00.000Z",
+        windowDurationMins: 300,
+      },
+    ],
+  };
+  const provider = (overrides: Partial<ServerProvider>): ServerProvider => ({
+    instanceId: ProviderInstanceId.make("codex"),
+    driver: ProviderDriverKind.make("codex"),
+    enabled: true,
+    installed: true,
+    version: null,
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt,
+    models: [],
+    slashCommands: [],
+    skills: [],
+    ...overrides,
+  });
+
+  it.effect("reports each enabled instance and filters on request", () =>
+    Effect.gen(function* () {
+      const providers = [
+        provider({ usageLimits: limits }),
+        provider({
+          instanceId: ProviderInstanceId.make("claude-work"),
+          driver: ProviderDriverKind.make("claudeAgent"),
+          displayName: "Claude Work",
+          auth: { status: "authenticated", label: "Max" },
+        }),
+        provider({ instanceId: ProviderInstanceId.make("codex-off"), enabled: false }),
+      ];
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed(providers),
+          refresh: () => Effect.succeed(providers),
+          refreshInstance: () => Effect.succeed(providers),
+        }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:provider-usage"),
+        requestNamespace: "provider-session:provider-usage",
+        thread: undefined,
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const all = yield* service.providerUsage(scope, {});
+        assert.deepEqual(
+          all.providers.map((entry) => String(entry.providerInstanceId)),
+          ["codex", "claude-work"],
+        );
+        assert.equal(all.providers[0]?.status, "ok");
+        assert.deepEqual(
+          all.providers[0]?.windows.map((window) => window.remainingPercent),
+          [75],
+        );
+        assert.equal(all.providers[1]?.status, "no_limits");
+        assert.equal(all.providers[1]?.plan, "Max");
+
+        const filtered = yield* service.providerUsage(scope, {
+          providerInstanceId: ProviderInstanceId.make("claude-work"),
+        });
+        assert.deepEqual(
+          filtered.providers.map((entry) => String(entry.providerInstanceId)),
+          ["claude-work"],
+        );
+
+        const missing = yield* service
+          .providerUsage(scope, { providerInstanceId: ProviderInstanceId.make("absent") })
+          .pipe(Effect.flip);
+        assert.equal(missing.code, "provider_unavailable");
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect("refreshes one instance, or every provider, as the Usage screen does", () =>
+    Effect.gen(function* () {
+      const refreshed = yield* Ref.make<ReadonlyArray<string>>([]);
+      const refreshAllCount = yield* Ref.make(0);
+      const providers = [provider({ usageLimits: limits })];
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({
+          getProviders: Effect.succeed(providers),
+          refresh: () =>
+            Ref.update(refreshAllCount, (count) => count + 1).pipe(Effect.as(providers)),
+          refreshInstance: (instanceId: ProviderInstanceId) =>
+            Ref.update(refreshed, (ids) => [...ids, String(instanceId)]).pipe(Effect.as(providers)),
+        }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        ServerSettings.layerTest(),
+      );
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:provider-usage-refresh"),
+        requestNamespace: "provider-session:provider-usage-refresh",
+        thread: undefined,
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        yield* service.providerUsage(scope, {
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          refresh: true,
+        });
+        assert.deepEqual(yield* Ref.get(refreshed), ["codex"]);
+        assert.equal(yield* Ref.get(refreshAllCount), 0);
+
+        yield* service.providerUsage(scope, { refresh: true });
+        assert.equal(yield* Ref.get(refreshAllCount), 1);
+      }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+});

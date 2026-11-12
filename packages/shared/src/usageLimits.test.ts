@@ -4,6 +4,9 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   type ServerProvider,
+  type UsageBucket,
+  type UsageSummary,
+  UsageDay,
   UsageLimitSourceId,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -23,6 +26,7 @@ import {
   paceRemainingPercent,
   usesChatGptSharing,
   resolveNewThreadModelSelection,
+  observedUsageFromSummary,
 } from "./usageLimits.ts";
 
 const now = Date.parse("2026-09-03T12:00:00.000Z");
@@ -1504,5 +1508,96 @@ describe("ChatGPT sharing presentation", () => {
         auth: { status: "unauthenticated", subscriptionSharing: true },
       }),
     ).toBe(false);
+  });
+});
+
+describe("observed usage from local records", () => {
+  const summary = (buckets: readonly UsageBucket[]): UsageSummary => ({
+    contractVersion: 6,
+    readAt: "2026-09-03T12:00:00.000Z",
+    timeZone: "UTC",
+    sinceDay: UsageDay.make("2026-09-03"),
+    untilDay: UsageDay.make("2026-09-03"),
+    buckets,
+    sources: [],
+    pricing: { status: "cached", source: "test", fetchedAt: null, knownModels: 0 },
+    scanDurationMs: 0,
+  });
+  const bucket = (overrides: Partial<UsageBucket> = {}): UsageBucket => ({
+    day: UsageDay.make("2026-09-03"),
+    provider: "opencode",
+    model: "big-pickle",
+    totals: {
+      uncachedInputTokens: 100,
+      cachedInputTokens: 20,
+      cacheCreationTokens: 0,
+      outputTokens: 30,
+      reasoningTokens: 0,
+    },
+    costUsd: 0.5,
+    cacheSavingsUsd: 0,
+    costSource: "unpriced",
+    records: 2,
+    unpricedRecords: 2,
+    sessions: 1,
+    ...overrides,
+  });
+
+  it("sums one provider's buckets per model and ignores other providers", () => {
+    const window = observedUsageFromSummary({
+      summary: summary([
+        bucket(),
+        bucket({ model: "small-pickle", records: 1, costUsd: 0.25 }),
+        bucket({ provider: "codex", model: "gpt-6" }),
+      ]),
+      provider: "opencode",
+      label: "Last 5 hours",
+      sinceMs: Date.parse("2026-09-03T07:00:00.000Z"),
+      untilMs: Date.parse("2026-09-03T12:00:00.000Z"),
+    });
+
+    expect(window.label).toBe("Last 5 hours");
+    expect(window.records).toBe(3);
+    expect(window.totalTokens).toBe(300);
+    expect(window.costUsd).toBe(0.75);
+    expect(window.models.map((model) => model.model)).toEqual(["big-pickle", "small-pickle"]);
+    expect(window.omittedModels).toBe(0);
+  });
+
+  it("drops hourly buckets that start outside the window", () => {
+    const window = observedUsageFromSummary({
+      summary: summary([
+        bucket({ hourStart: "2026-09-03T06:00:00.000Z" }),
+        bucket({ hourStart: "2026-09-03T10:00:00.000Z" }),
+        bucket({ hourStart: "2026-09-03T13:00:00.000Z" }),
+      ]),
+      provider: "opencode",
+      label: "Last 5 hours",
+      sinceMs: Date.parse("2026-09-03T07:00:00.000Z"),
+      untilMs: Date.parse("2026-09-03T12:00:00.000Z"),
+    });
+
+    expect(window.records).toBe(2);
+    expect(window.models).toHaveLength(1);
+  });
+
+  it("caps the listed models without changing the totals", () => {
+    const window = observedUsageFromSummary({
+      summary: summary([
+        bucket(),
+        bucket({ model: "b" }),
+        bucket({ model: "c" }),
+        bucket({ model: "d" }),
+      ]),
+      provider: "opencode",
+      label: "Last 7 days",
+      sinceMs: 0,
+      untilMs: Date.parse("2026-09-03T12:00:00.000Z"),
+      modelLimit: 2,
+    });
+
+    expect(window.models).toHaveLength(2);
+    expect(window.omittedModels).toBe(2);
+    expect(window.records).toBe(8);
   });
 });

@@ -1,4 +1,5 @@
 import { expect, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
@@ -26,4 +27,21 @@ it("refuses a t3_thread_update whose fields do not fit its action", () => {
   expect(Exit.isSuccess(decode({ action: "rename", title: "New", environmentId: undefined }))).toBe(
     true,
   );
+});
+
+it("lets provider_usage filter to one instance and refresh, and nothing else", () => {
+  const decode = Schema.decodeUnknownExit(
+    OrchestratorToolkit.tools.provider_usage.parametersSchema,
+  );
+  expect(Exit.isSuccess(decode({ environmentId: undefined }))).toBe(true);
+  expect(Exit.isSuccess(decode({ providerInstanceId: "opencode-go", refresh: true }))).toBe(true);
+  expect(Exit.isFailure(decode({ refresh: "yes" }))).toBe(true);
+  expect(Exit.isFailure(decode({ providerInstanceId: "" }))).toBe(true);
+});
+
+it("advertises provider_usage as read-only", () => {
+  const tool = OrchestratorToolkit.tools.provider_usage;
+  expect(tool.description).toContain("plan limits");
+  expect(tool.description).toContain("observed usage");
+  expect(Context.get(tool.annotations, Tool.Readonly)).toBe(true);
 });

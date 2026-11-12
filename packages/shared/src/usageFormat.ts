@@ -295,3 +295,37 @@ export function makeWindow(
     resolution,
   };
 }
+
+/** Hourly usage for the last `hours` hours, ending now. At most 24 hours, as the server allows. */
+export function makeRollingWindow(hours: number, now = new Date()): UsageSummaryInput {
+  const untilTimeMs = Math.floor(now.getTime() / 60_000) * 60_000;
+  const sinceTimeMs = untilTimeMs - Math.min(24, Math.max(1, hours)) * HOUR_MS;
+  let timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  let format: Intl.DateTimeFormat;
+  try {
+    format = new Intl.DateTimeFormat("en-CA", {
+      timeZone,
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+  } catch {
+    timeZone = "UTC";
+    format = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "UTC",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    });
+  }
+  const sinceTime = new Date(sinceTimeMs);
+  const untilTime = new Date(untilTimeMs);
+  return {
+    sinceDay: UsageDay.make(format.format(sinceTime)),
+    untilDay: UsageDay.make(format.format(untilTime)),
+    timeZone,
+    resolution: "hour",
+    sinceTime: sinceTime.toISOString(),
+    untilTime: untilTime.toISOString(),
+  };
+}

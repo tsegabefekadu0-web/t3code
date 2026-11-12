@@ -17,6 +17,9 @@ import {
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
   type OrchestratorMcpModelOption,
+  type OrchestratorMcpObservedUsage,
+  type OrchestratorMcpProviderUsageInput,
+  type OrchestratorMcpProviderUsageResult,
   type OrchestratorMcpCreateThreadsInput,
   type OrchestratorMcpCreateThreadsResult,
   type OrchestratorMcpCreatedThread,
@@ -61,12 +64,17 @@ import {
   type ServerProvider,
   type ServerProviderModel,
   ThreadId,
+  UsageDay,
+  type UsageReadError,
+  type UsageSummary,
+  type UsageSummaryInput,
   isOrchestrationV2WorkActive,
   resolveProjectProviderInstanceEnabled,
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
 import { formatThreadLink } from "@t3tools/shared/threadLinks";
+import { observedUsageFromSummary } from "@t3tools/shared/usageLimits";
 import {
   normalizeThreadPullRequestKey,
   visibleThreadPullRequests,
@@ -107,6 +115,9 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as UsageLimitSources from "../usage/UsageLimitSources.ts";
+import * as UsageService from "../usage/UsageService.ts";
+import { needsObservedUsage, providerUsageEntry } from "./toolkits/orchestrator/providerUsage.ts";
 import {
   clientModeCeiling,
   type McpInvocationScope,
@@ -157,6 +168,11 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input?: OrchestratorMcpCapabilitiesInput,
   ) => Effect.Effect<OrchestratorMcpCapabilitiesResult, OrchestratorMcpFailure>;
+  /** Read-only plan limits per provider instance, plus local records when a provider has none. */
+  readonly providerUsage: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpProviderUsageInput,
+  ) => Effect.Effect<OrchestratorMcpProviderUsageResult, OrchestratorMcpFailure>;
   readonly delegateTask: (
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTaskInput,
@@ -1021,6 +1037,9 @@ const make = Effect.gen(function* () {
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
+  // Usage reads are an enrichment: a toolkit built without them still answers limits.
+  const usageLimitSources = yield* Effect.serviceOption(UsageLimitSources.UsageLimitSources);
+  const usageService = yield* Effect.serviceOption(UsageService.UsageService);
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -1289,6 +1308,81 @@ const make = Effect.gen(function* () {
   });
 
   const loadProviders = providerRegistry.getProviders;
+
+  const OBSERVED_USAGE_HOUR_MS = 60 * 60 * 1_000;
+  const observedUsageDay = (ms: number) =>
+    UsageDay.make(DateTime.formatIso(DateTime.makeUnsafe(ms)).slice(0, 10));
+
+  // The Usage screen reads local records for its charts; these windows reuse that same read.
+  const readObservedUsageWindow = (
+    readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>,
+    input: {
+      readonly label: string;
+      readonly sinceMs: number;
+      readonly untilMs: number;
+      readonly resolution: "hour" | "day";
+      readonly awaitRefresh: boolean;
+    },
+  ) => {
+    const since = DateTime.formatIso(DateTime.makeUnsafe(input.sinceMs));
+    const until = DateTime.formatIso(DateTime.makeUnsafe(input.untilMs));
+    return readSummary({
+      sinceDay: observedUsageDay(input.sinceMs),
+      untilDay: observedUsageDay(input.untilMs),
+      timeZone: "UTC",
+      resolution: input.resolution,
+      ...(input.resolution === "hour" ? { sinceTime: since, untilTime: until } : {}),
+      awaitRefresh: input.awaitRefresh,
+    }).pipe(
+      Effect.map((summary) =>
+        observedUsageFromSummary({
+          summary,
+          provider: "opencode",
+          label: input.label,
+          sinceMs: input.sinceMs,
+          untilMs: input.untilMs,
+          modelLimit: 6,
+        }),
+      ),
+      Effect.orElseSucceed(() => null),
+    );
+  };
+
+  const localObservedUsage = Effect.fn("OrchestratorMcpService.localObservedUsage")(
+    function* (input: { readonly now: number; readonly awaitRefresh: boolean }) {
+      if (Option.isNone(usageService)) return undefined;
+      const { readSummary } = usageService.value;
+      const [fiveHours, sevenDays] = yield* Effect.all(
+        [
+          readObservedUsageWindow(readSummary, {
+            label: "Last 5 hours",
+            sinceMs: input.now - 5 * OBSERVED_USAGE_HOUR_MS,
+            untilMs: input.now,
+            resolution: "hour",
+            awaitRefresh: input.awaitRefresh,
+          }),
+          readObservedUsageWindow(readSummary, {
+            label: "Last 7 days",
+            sinceMs: input.now - 7 * 24 * OBSERVED_USAGE_HOUR_MS,
+            untilMs: input.now,
+            resolution: "day",
+            awaitRefresh: input.awaitRefresh,
+          }),
+        ],
+        { concurrency: 2 },
+      );
+      const windows = [fiveHours, sevenDays].flatMap((window) => (window === null ? [] : [window]));
+      if (windows.length === 0) return undefined;
+      return {
+        source: "t3_usage_records",
+        note: "Observed usage from T3's local records. This provider reports no plan limit, so these are not quota percentages.",
+        windows: windows.map((window) => ({
+          ...window,
+          models: window.models.map((model) => ({ ...model })),
+        })),
+      } satisfies OrchestratorMcpObservedUsage;
+    },
+  );
 
   const loadOrchestrationCapableInstanceIds = () =>
     providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
@@ -2250,6 +2344,44 @@ const make = Effect.gen(function* () {
         );
       }
       return { status, secretRef: secretRef.value };
+    }),
+
+    providerUsage: Effect.fn("OrchestratorMcpService.providerUsage")(function* (scope, input) {
+      yield* requireCapability(scope);
+      if (input.refresh === true) {
+        // Same reads the Usage screen's refresh triggers: hub sources first, then providers.
+        if (input.providerInstanceId === undefined) {
+          if (Option.isSome(usageLimitSources)) yield* usageLimitSources.value.refresh;
+          yield* providerRegistry.refresh();
+        } else {
+          yield* providerRegistry.refreshInstance(input.providerInstanceId);
+        }
+      }
+      const now = yield* Clock.currentTimeMillis;
+      const providers = yield* providerRegistry.getProviders;
+      const requested = input.providerInstanceId;
+      if (requested !== undefined && !providers.some((p) => p.instanceId === requested)) {
+        return yield* failure(
+          "provider_unavailable",
+          `Provider instance ${requested} was not found.`,
+        );
+      }
+      const targets = providers.filter((provider) =>
+        requested === undefined ? provider.enabled : provider.instanceId === requested,
+      );
+      let entries = targets.map((provider) => providerUsageEntry({ provider, now }));
+      if (entries.some(needsObservedUsage)) {
+        const observed = yield* localObservedUsage({
+          now,
+          awaitRefresh: input.refresh === true,
+        });
+        if (observed !== undefined) {
+          entries = entries.map((entry) =>
+            needsObservedUsage(entry) ? { ...entry, observed } : entry,
+          );
+        }
+      }
+      return { readAt: DateTime.formatIso(DateTime.makeUnsafe(now)), providers: entries };
     }),
 
     capabilities: Effect.fn("OrchestratorMcpService.capabilities")(function* (scope, input = {}) {

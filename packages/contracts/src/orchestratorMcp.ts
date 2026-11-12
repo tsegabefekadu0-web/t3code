@@ -649,6 +649,88 @@ export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
 });
 export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabilitiesResult.Type;
 
+export const OrchestratorMcpProviderUsageInput = Schema.Struct({
+  environmentId: OrchestratorMcpEnvironmentTarget,
+  providerInstanceId: Schema.optional(
+    ProviderInstanceId.annotate({ description: "Read only this provider instance." }),
+  ),
+  refresh: Schema.optional(
+    Schema.Boolean.annotate({
+      description: "Re-read provider limits first, as the Usage screen's refresh does. Slower.",
+    }),
+  ),
+});
+export type OrchestratorMcpProviderUsageInput = typeof OrchestratorMcpProviderUsageInput.Type;
+
+export const OrchestratorMcpProviderUsageWindow = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  kind: Schema.Literals(["session", "weekly", "monthly", "other"]),
+  label: TrimmedNonEmptyString,
+  usedPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  remainingPercent: Schema.Number.check(Schema.isBetween({ minimum: 0, maximum: 100 })),
+  resetsAt: Schema.NullOr(IsoDateTime),
+  /** Relative to now, such as "resets in 2h 3m". Null without a reset time. */
+  resetsIn: Schema.NullOr(TrimmedNonEmptyString),
+  windowDurationMins: Schema.NullOr(NonNegativeInt),
+});
+export type OrchestratorMcpProviderUsageWindow = typeof OrchestratorMcpProviderUsageWindow.Type;
+
+export const OrchestratorMcpObservedModelUsage = Schema.Struct({
+  model: TrimmedNonEmptyString,
+  /** Usage records in the window, which is T3's count of turns, not the provider's request count. */
+  records: NonNegativeInt,
+  totalTokens: NonNegativeInt,
+  costUsd: Schema.Number,
+});
+export type OrchestratorMcpObservedModelUsage = typeof OrchestratorMcpObservedModelUsage.Type;
+
+export const OrchestratorMcpObservedUsageWindow = Schema.Struct({
+  label: TrimmedNonEmptyString,
+  since: IsoDateTime,
+  until: IsoDateTime,
+  records: NonNegativeInt,
+  totalTokens: NonNegativeInt,
+  costUsd: Schema.Number,
+  models: Schema.Array(OrchestratorMcpObservedModelUsage),
+  /** Models left out of `models`. */
+  omittedModels: NonNegativeInt,
+});
+export type OrchestratorMcpObservedUsageWindow = typeof OrchestratorMcpObservedUsageWindow.Type;
+
+/** Local T3 usage records for providers with no plan limit to read. Never a quota. */
+export const OrchestratorMcpObservedUsage = Schema.Struct({
+  source: Schema.Literal("t3_usage_records"),
+  note: TrimmedNonEmptyString,
+  /** Newest window first. */
+  windows: Schema.Array(OrchestratorMcpObservedUsageWindow),
+});
+export type OrchestratorMcpObservedUsage = typeof OrchestratorMcpObservedUsage.Type;
+
+export const OrchestratorMcpProviderUsage = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  driverKind: ProviderDriverKind,
+  displayName: Schema.NullOr(Schema.String),
+  /** The provider account's plan, when it reports one. */
+  plan: Schema.NullOr(TrimmedNonEmptyString),
+  status: Schema.Literals(["ok", "no_limits", "unsupported", "probe_failed"]),
+  /** Why there are no windows, when status is not "ok". */
+  notice: Schema.NullOr(TrimmedNonEmptyString),
+  /** When the provider last read these numbers. */
+  fetchedAt: Schema.NullOr(IsoDateTime),
+  ageSeconds: Schema.NullOr(NonNegativeInt),
+  /** True when `fetchedAt` is older than the health refresh interval can explain. */
+  stale: Schema.Boolean,
+  windows: Schema.Array(OrchestratorMcpProviderUsageWindow),
+  observed: Schema.optional(OrchestratorMcpObservedUsage),
+});
+export type OrchestratorMcpProviderUsage = typeof OrchestratorMcpProviderUsage.Type;
+
+export const OrchestratorMcpProviderUsageResult = Schema.Struct({
+  readAt: IsoDateTime,
+  providers: Schema.Array(OrchestratorMcpProviderUsage),
+});
+export type OrchestratorMcpProviderUsageResult = typeof OrchestratorMcpProviderUsageResult.Type;
+
 export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   environmentId: OrchestratorMcpEnvironmentTarget,
   projectId: OrchestratorMcpProjectTarget,
