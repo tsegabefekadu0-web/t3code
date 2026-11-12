@@ -14,6 +14,13 @@ import {
   paceRemainingPercent,
   remainingPercent,
 } from "@t3tools/shared/usageLimits";
+import {
+  formatTokens,
+  formatUsd,
+  makeRollingWindow,
+  makeWindow,
+} from "@t3tools/shared/usageFormat";
+import type { EnvironmentId } from "@t3tools/contracts";
 import type { Popover as PopoverPrimitive } from "@base-ui/react/popover";
 import { normalizeProviderAccentColor } from "@t3tools/client-runtime/state/provider-instance-display";
 import { AlertTriangleIcon, ExternalLinkIcon, TicketIcon } from "lucide-react";
@@ -31,6 +38,7 @@ import {
 import { ensureLocalApi } from "../../localApi";
 import { usePrimarySettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
+import { useUsage } from "../../state/usage";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { ProviderInstanceIcon } from "../chat/ProviderInstanceIcon";
 import { providerClients } from "../settings/providerDriverMeta";
@@ -602,6 +610,87 @@ function PoolSection({ pool, now }: { readonly pool: LimitPool; readonly now: nu
   );
 }
 
+const OBSERVED_MODEL_LIMIT = 8;
+
+/**
+ * OpenCode reports no plan limits outside the paid Go plan, so the Limits view
+ * falls back to counts from T3's own records. These are never drawn as quota bars.
+ */
+function OpenCodeObservedUsage({
+  environmentKey,
+  now,
+}: {
+  readonly environmentKey: string;
+  readonly now: number;
+}) {
+  const environmentIds = new Set(
+    environmentKey
+      .split(",")
+      .filter(Boolean)
+      .map((id) => id as EnvironmentId),
+  );
+  const fiveHourWindow = makeRollingWindow(5, new Date(now));
+  const weekWindow = makeWindow(7, new Date(now), "day");
+  const fiveHours = useUsage(fiveHourWindow, environmentIds);
+  const sevenDays = useUsage(weekWindow, environmentIds);
+  const windows = [
+    { label: "Last 5 hours", usage: fiveHours },
+    { label: "Last 7 days", usage: sevenDays },
+  ].flatMap(({ label, usage }) => {
+    const totals = usage.merged.providers.find((provider) => provider.provider === "opencode");
+    if (totals === undefined) return [];
+    const models = usage.merged.models
+      .filter((model) => model.provider === "opencode")
+      .toSorted(
+        (left, right) =>
+          right.totalTokens - left.totalTokens || left.model.localeCompare(right.model),
+      )
+      .slice(0, OBSERVED_MODEL_LIMIT);
+    return [{ label, totals, models }];
+  });
+  if (windows.length === 0) return null;
+  return (
+    <section className="flex flex-col gap-3">
+      <h2 className="text-sm font-medium text-foreground">OpenCode</h2>
+      <p className="text-xs text-muted-foreground">
+        Observed usage, no plan limit available. Counts come from this machine&apos;s OpenCode
+        records, not from a quota.
+      </p>
+      {windows.map(({ label, totals, models }) => (
+        <div
+          key={label}
+          className="grid gap-3 rounded-lg border border-border/60 p-4 md:grid-cols-[11rem_minmax(0,1fr)]"
+        >
+          <div className="flex flex-col gap-1">
+            <span className="text-sm font-medium text-foreground">{label}</span>
+            <span className="text-2xl font-semibold text-foreground tabular-nums">
+              {formatTokens(totals.totalTokens)}
+            </span>
+            <span className="text-xs text-muted-foreground tabular-nums">
+              {totals.records} request{totals.records === 1 ? "" : "s"}
+              {totals.costUsd > 0 ? ` · ${formatUsd(totals.costUsd)}` : ""}
+            </span>
+          </div>
+          <div className="flex min-w-0 flex-col gap-1">
+            {models.map((model) => (
+              <div
+                key={`${model.provider}:${model.model}`}
+                className="grid grid-cols-[minmax(0,1fr)_auto_auto] gap-x-3 text-xs"
+              >
+                <span className="truncate text-foreground">{model.model}</span>
+                <span className="text-muted-foreground tabular-nums">{model.records} req</span>
+                <span className="text-foreground tabular-nums">
+                  {formatTokens(model.totalTokens)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      ))}
+    </section>
+  );
+}
+
 export function UsageLimitsPooled({
   presentations,
   now,
@@ -616,6 +705,13 @@ export function UsageLimitsPooled({
   const pools = collectLimitPools(collectLimitAccounts(presentations), now);
   const notices = collectLimitNotices(presentations);
   const externalLinks = collectExternalUsageLinks(presentations);
+  const openCodeReportedLimits = pools.some((pool) => pool.driver === "opencode");
+  const hasOpenCode = [...presentations.values()].some((presentation) =>
+    (presentation.serverConfig?.providers ?? []).some(
+      (provider) => provider.driver === "opencode" && provider.enabled,
+    ),
+  );
+  const openCodeEnvironmentKey = [...presentations.keys()].sort().join(",");
   const cursorPromptAt =
     Math.max(
       pools.findIndex((pool) => pool.driver === "codex"),
@@ -684,6 +780,9 @@ export function UsageLimitsPooled({
         </section>
       ))}
       <LimitNotices notices={notices} />
+      {hasOpenCode && !openCodeReportedLimits ? (
+        <OpenCodeObservedUsage environmentKey={openCodeEnvironmentKey} now={now} />
+      ) : null}
     </div>
   );
 }
