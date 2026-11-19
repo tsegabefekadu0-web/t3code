@@ -4,6 +4,7 @@ import type { UsageSource } from "@t3tools/contracts";
 
 import {
   formatHourShort,
+  formatTokens,
   makeRollingWindow,
   makeWindow,
   usageSourceMessages,
@@ -199,5 +200,13 @@ describe("rolling hourly windows", () => {
     const window = makeRollingWindow(5, new Date("2026-08-12T02:00:00.000Z"));
     expect(window.sinceDay <= window.untilDay).toBe(true);
     expect(Date.parse(window.untilTime!) - Date.parse(window.sinceTime!)).toBe(5 * 60 * 60_000);
+  });
+});
+
+describe("token formatting", () => {
+  it("moves to the next unit when rounding reaches it", () => {
+    expect(formatTokens(999_999)).toBe("1M");
+    expect(formatTokens(999_999_999)).toBe("1B");
+    expect(formatTokens(-999_999)).toBe("-1M");
   });
 });
