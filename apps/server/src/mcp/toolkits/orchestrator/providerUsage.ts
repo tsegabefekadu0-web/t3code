@@ -5,12 +5,8 @@ import {
   type ServerProvider,
   type ServerProviderUsageLimits,
 } from "@t3tools/contracts";
-import {
-  formatResetsIn,
-  limitsNotice,
-  PROVIDER_USAGE_STALE_AFTER_MS,
-  remainingPercent,
-} from "@t3tools/shared/usageLimits";
+import { PROVIDER_USAGE_STALE_AFTER_MS, remainingPercent } from "@t3tools/shared/usageLimits";
+import { formatResetsIn, limitsNotice } from "@t3tools/shared/usageLimitsCopy";
 
 function usageStatus(limits: ServerProviderUsageLimits | undefined) {
   if (limits === undefined) return "no_limits" as const;
